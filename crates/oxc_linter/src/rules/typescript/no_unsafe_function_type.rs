@@ -65,13 +65,6 @@ impl Rule for NoUnsafeFunctionType {
         match node.kind() {
             AstKind::TSTypeReference(reference) => {
                 if let TSTypeName::IdentifierReference(iden_ref) = &reference.type_name {
-                    if iden_ref.name == "Function" {
-                        println!(
-                            "type_name is {:?}, type_parameters is {:?}",
-                            reference.type_name, reference.type_parameters
-                        );
-                        ctx.diagnostic(no_unsafe_function_type_diagnostic(iden_ref.span));
-                    }
                     handle_function_type(iden_ref, ctx);
                 }
             }
@@ -92,6 +85,13 @@ impl Rule for NoUnsafeFunctionType {
 
 fn handle_function_type<'a>(identifier: &Box<'a, IdentifierReference<'a>>, ctx: &LintContext<'a>) {
     if identifier.name == "Function" {
+        // If the reference doesn't have a symbol_id, then it indicates that it's the global Function type
+        if let Some(ref_id) = identifier.reference_id() {
+            let reference = ctx.semantic().symbols().get_reference(ref_id);
+            if let Some(_symbol_id) = reference.symbol_id() {
+                return;
+            }
+        }
         ctx.diagnostic(no_unsafe_function_type_diagnostic(identifier.span));
     }
 }

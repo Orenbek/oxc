@@ -1,13 +1,13 @@
+use oxc_ast::{
+    ast::{TSInterfaceDeclaration, TSTypeLiteral},
+    AstKind,
+};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
+use oxc_semantic::NodeId;
 use oxc_span::Span;
 
-use crate::{
-    context::LintContext,
-    fixer::{RuleFix, RuleFixer},
-    rule::Rule,
-    AstNode,
-};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
 fn no_empty_object_type_diagnostic(span: Span) -> OxcDiagnostic {
     // See <https://oxc.rs/docs/contribute/linter/adding-rules.html#diagnostics> for details
@@ -17,14 +17,29 @@ fn no_empty_object_type_diagnostic(span: Span) -> OxcDiagnostic {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct NoEmptyObjectType;
+pub struct NoEmptyObjectType {
+    /** Whether to allow empty interfaces. */
+    allow_interfaces: AllowInterfaces,
+    /** Whether to allow empty object type literals. */
+    allow_object_types: AllowObjectTypes,
+    /** allow interfaces and object type aliases with the configured name */
+    allow_with_name: String,
+}
 
 declare_oxc_lint!(
     /// ### What it does
-    ///
+    /// To avoid confusion around the `{}` type allowing any non-nullish value, this rule bans usage of the `{}` type. That includes interfaces and object type aliases with no fields.
     ///
     /// ### Why is this bad?
+    /// The `{}`, or "empty object" type in TypeScript is a common source of confusion for developers unfamiliar with TypeScript's structural typing. `{}` represents any non-nullish value, including literals like 0 and "".
+    /// Often, developers writing `{}` actually mean either:
+    /// - object: representing any object value
+    /// - unknown: representing any value at all, including null and undefined
+    /// In other words, the "empty object" type {}` really means "any value that is defined". That includes arrays, class instances, functions, and primitives such as string and symbol.
     ///
+    /// Note that this rule does not report on:
+    /// - `{}` as a type constituent in an intersection type (e.g. types like TypeScript's built-in `type NonNullable<T> = T & {}`), as this can be useful in type system operations.
+    /// - Interfaces that extend from multiple other interfaces.
     ///
     /// ### Examples
     ///
@@ -38,22 +53,123 @@ declare_oxc_lint!(
     /// FIXME: Tests will fail if examples are missing or syntactically incorrect.
     /// ```
     NoEmptyObjectType,
-    nursery, // TODO: change category to `correctness`, `suspicious`, `pedantic`, `perf`, `restriction`, or `style`
-             // See <https://oxc.rs/docs/contribute/linter.html#rule-category> for details
-
-    pending  // TODO: describe fix capabilities. Remove if no fix can be done,
-             // keep at 'pending' if you think one could be added but don't know how.
-             // Options are 'fix', 'fix_dangerous', 'suggestion', and 'conditional_fix_suggestion'
+    suspicious,
 );
 
 impl Rule for NoEmptyObjectType {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {}
+    fn from_configuration(value: serde_json::Value) -> Self {
+        let (allow_interfaces, allow_object_types, allow_with_name) = value.get(0).map_or(
+            (AllowInterfaces::Never, AllowObjectTypes::Never, String::default()),
+            |config| {
+                (
+                    config
+                        .get("allowInterfaces")
+                        .and_then(serde_json::Value::as_str)
+                        .map(AllowInterfaces::from)
+                        .unwrap_or_default(),
+                    config
+                        .get("allowObjectTypes")
+                        .and_then(serde_json::Value::as_str)
+                        .map(AllowObjectTypes::from)
+                        .unwrap_or_default(),
+                    config
+                        .get("allowWithName")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_default(),
+                )
+            },
+        );
+        Self { allow_interfaces, allow_object_types, allow_with_name }
+    }
+
+    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
+        let interface_declaration_is_empty = |interface: &TSInterfaceDeclaration| {
+            if let AllowInterfaces::Always = self.allow_interfaces {
+                return;
+            };
+            if interface.id.name.as_str() == self.allow_with_name.as_str() {
+                return;
+            }
+            match interface.extends.as_ref() {
+                Some(extends) if extends.len() == 1 => {
+                    match self.allow_interfaces {
+                        AllowInterfaces::WithSingleExtends => (),
+                        _ => ctx.diagnostic(no_empty_object_type_diagnostic(interface.span)),
+                    };
+                }
+                Some(extends) if extends.len() == 0 => {
+                    ctx.diagnostic(no_empty_object_type_diagnostic(interface.span));
+                }
+                None => ctx.diagnostic(no_empty_object_type_diagnostic(interface.span)),
+                _ => (),
+            }
+        };
+        let type_literal_is_empty = |type_literal: &TSTypeLiteral, node_id: NodeId| {
+            if let AllowObjectTypes::Always = self.allow_object_types {
+                return;
+            };
+            let parent_node = ctx.nodes().parent_node(node_id).unwrap();
+            match parent_node.kind() {
+                AstKind::TSIntersectionType(_) => return,
+                AstKind::TSTypeAliasDeclaration(alias) => {
+                    if alias.id.name.as_str() == self.allow_with_name.as_str() {
+                        return;
+                    }
+                }
+                _ => (),
+            }
+            ctx.diagnostic(no_empty_object_type_diagnostic(type_literal.span));
+        };
+        match node.kind() {
+            AstKind::TSInterfaceDeclaration(interface) if interface.body.body.len() == 0 => {
+                interface_declaration_is_empty(interface)
+            }
+            AstKind::TSTypeLiteral(typeliteral) if typeliteral.members.len() == 0 => {
+                type_literal_is_empty(typeliteral, node.id())
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+enum AllowInterfaces {
+    #[default]
+    Never,
+    Always,
+    WithSingleExtends,
+}
+
+impl AllowInterfaces {
+    pub fn from(raw: &str) -> Self {
+        match raw {
+            "always" => Self::Always,
+            "with-single-extends" => Self::WithSingleExtends,
+            _ => Self::Never,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+enum AllowObjectTypes {
+    #[default]
+    Never,
+    Always,
+}
+
+impl AllowObjectTypes {
+    pub fn from(raw: &str) -> Self {
+        match raw {
+            "always" => Self::Always,
+            _ => Self::Never,
+        }
+    }
 }
 
 #[test]
 fn test() {
     use crate::tester::Tester;
-    use std::path::PathBuf;
 
     let pass = vec![
         (
@@ -128,14 +244,14 @@ fn test() {
         ("type Base = {};", Some(serde_json::json!([{ "allowWithName": "Base" }])), None, None),
         (
             "type BaseProps = {};",
-            Some(serde_json::json!([{ "allowWithName": "Props$" }])),
+            Some(serde_json::json!([{ "allowWithName": "BaseProps" }])),
             None,
             None,
         ),
         ("interface Base {}", Some(serde_json::json!([{ "allowWithName": "Base" }])), None, None),
         (
             "interface BaseProps {}",
-            Some(serde_json::json!([{ "allowWithName": "Props$" }])),
+            Some(serde_json::json!([{ "allowWithName": "BaseProps" }])),
             None,
             None,
         ),
@@ -235,7 +351,7 @@ fn test() {
 			      ",
             None,
             None,
-            Some(PathBuf::from("'test.d.ts'")),
+            None,
         ),
         ("type Base = {};", None, None, None),
         ("type Base = {};", Some(serde_json::json!([{ "allowObjectTypes": "never" }])), None, None),
@@ -259,12 +375,7 @@ fn test() {
             None,
         ),
         ("type Base = {};", Some(serde_json::json!([{ "allowWithName": "Mismatch" }])), None, None),
-        (
-            "interface Base {}",
-            Some(serde_json::json!([{ "allowWithName": ".*Props$" }])),
-            None,
-            None,
-        ),
+        ("interface Base {}", Some(serde_json::json!([{ "allowWithName": "Props" }])), None, None),
     ];
 
     Tester::new(NoEmptyObjectType::NAME, pass, fail).test_and_snapshot();
