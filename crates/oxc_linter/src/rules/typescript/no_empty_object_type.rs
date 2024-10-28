@@ -17,13 +17,25 @@ fn no_empty_object_type_diagnostic(span: Span) -> OxcDiagnostic {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct NoEmptyObjectType {
+pub struct NoEmptyObjectType(Box<NoEmptyObjectTypeConfig>);
+
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Default, Clone)]
+pub struct NoEmptyObjectTypeConfig {
     /** Whether to allow empty interfaces. */
     allow_interfaces: AllowInterfaces,
     /** Whether to allow empty object type literals. */
     allow_object_types: AllowObjectTypes,
     /** allow interfaces and object type aliases with the configured name */
     allow_with_name: String,
+}
+
+impl std::ops::Deref for NoEmptyObjectType {
+    type Target = NoEmptyObjectTypeConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 declare_oxc_lint!(
@@ -45,12 +57,27 @@ declare_oxc_lint!(
     ///
     /// Examples of **incorrect** code for this rule:
     /// ```ts
-    /// FIXME: Tests will fail if examples are missing or syntactically incorrect.
+    /// let anyObject: {};
+    /// let anyValue: {};
+    /// interface AnyObjectA {}
+    /// interface AnyValueA {}
+    /// type AnyObjectB = {};
+    /// type AnyValueB = {};
     /// ```
     ///
     /// Examples of **correct** code for this rule:
     /// ```ts
-    /// FIXME: Tests will fail if examples are missing or syntactically incorrect.
+    /// let anyObject: object;
+    /// let anyValue: unknown;
+    /// type AnyObjectA = object;
+    /// type AnyValueA = unknown;
+    /// type AnyObjectB = object;
+    /// type AnyValueB = unknown;
+    /// let objectWith: { property: boolean };
+    /// interface InterfaceWith {
+    ///   property: boolean;
+    /// }
+    /// type TypeWith = { property: boolean };
     /// ```
     NoEmptyObjectType,
     suspicious,
@@ -80,7 +107,11 @@ impl Rule for NoEmptyObjectType {
                 )
             },
         );
-        Self { allow_interfaces, allow_object_types, allow_with_name }
+        Self(Box::new(NoEmptyObjectTypeConfig {
+            allow_interfaces,
+            allow_object_types,
+            allow_with_name,
+        }))
     }
 
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
@@ -123,10 +154,10 @@ impl Rule for NoEmptyObjectType {
         };
         match node.kind() {
             AstKind::TSInterfaceDeclaration(interface) if interface.body.body.len() == 0 => {
-                interface_declaration_is_empty(interface)
+                interface_declaration_is_empty(interface);
             }
             AstKind::TSTypeLiteral(typeliteral) if typeliteral.members.len() == 0 => {
-                type_literal_is_empty(typeliteral, node.id())
+                type_literal_is_empty(typeliteral, node.id());
             }
             _ => {}
         }

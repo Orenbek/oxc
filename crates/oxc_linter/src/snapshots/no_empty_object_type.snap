@@ -1,6 +1,5 @@
 ---
 source: crates/oxc_linter/src/tester.rs
-assertion_line: 353
 ---
   ⚠ typescript-eslint(no-empty-object-type): Disallow accidentally using the "empty object" type.
    ╭─[no_empty_object_type.tsx:1:1]
